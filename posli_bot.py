@@ -119,8 +119,7 @@ def odpoved(text: str) -> str:
             return f"Notion: {u}"
         d = datetime.now(CASOVA_ZONA).date()
         dnesni = [x for x in u if x["termin"].date() == d]
-        propadle = [x for x in u if x["termin"].date() < d]
-        return f"Nehotových úkolů: {len(u)} (dnes {len(dnesni)}, propadlých {len(propadle)})."
+        return f"Nehotových úkolů: {len(u)} (dnes {len(dnesni)})."
     if t.startswith(("hotovo", "splneno")):
         dotaz = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
         if not dotaz:
