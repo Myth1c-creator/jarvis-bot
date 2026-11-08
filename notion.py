@@ -222,31 +222,6 @@ def sestav_prehled(ukoly: list[dict], dnes: date | None = None,
             if len(tydenni) > 8:
                 radky.append(f"• … a dalších {len(tydenni) - 8}")
 
-    propadle = sorted((u for u in ukoly if u["termin"].date() < dnes),
-                      key=lambda u: u["termin"])
-    if propadle:
-        hranice = dnes - timedelta(days=7)
-        nedavne = [u for u in propadle if u["termin"].date() >= hranice]
-        starsi = len(propadle) - len(nedavne)
-        radky.append("")
-        if nedavne:
-            hlavicka = f"Propadlé: {len(nedavne)} za posledních 7 dní"
-            if starsi:
-                hlavicka += f" (+ {starsi} starších)"
-        else:
-            hlavicka = f"Propadlé: {starsi} starších"
-        radky.append(hlavicka + ":")
-        videne = set()
-        ukazky = []
-        for u in reversed(nedavne):
-            if u["nazev"] in videne:
-                continue
-            videne.add(u["nazev"])
-            ukazky.append(u)
-            if len(ukazky) == 3:
-                break
-        radky += [f"• {u['termin'].day}. {u['termin'].month}. – {u['nazev']}" for u in ukazky]
-
     radky += ["", f"Všechny úkoly: {NOTION_URL}"]
     return "\n".join(radky)
 
