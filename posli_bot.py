@@ -12,6 +12,7 @@ Volný chat (OpenCode) umí jen lokální bot na zapnutém PC.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -32,6 +33,7 @@ POMOC = (
     "• briefing / dnes / zítra / týden\n"
     "• kolik mám úkolů\n"
     "• hotovo <název úkolu>\n"
+    "• nový úkol zavolat DIS zítra 15:00\n"
     "• nebo napiš název úkolu – najdu ho\n\n"
     "Připomínky a volný chat umí jen bot na zapnutém PC."
 )
@@ -88,6 +90,65 @@ def _ukoly():
         return e
 
 
+def _kdy(text: str):
+    """Miniparser času pro cloud: +2h, +30m, dnes 18:00, zítra 9:00, 2026-11-12 08:30."""
+    now = datetime.now(CASOVA_ZONA).replace(second=0, microsecond=0)
+    t = " ".join(text.strip().lower().split())
+    m = re.fullmatch(r"\+(\d+)\s*(m|min\w*|h|hod\w*|d|den\w*|w|tyden\w*|týden\w*)", t)
+    if m:
+        n = int(m.group(1))
+        j = m.group(2)
+        if j.startswith(("m", "min")):
+            return now + timedelta(minutes=n)
+        if j.startswith(("h", "hod")):
+            return now + timedelta(hours=n)
+        if j.startswith(("w", "tyden", "týden")):
+            return now + timedelta(weeks=n)
+        return now + timedelta(days=n)
+    m = re.fullmatch(r"(?:(dnes|zitra|zítra|pozitri|pozítří)\s+)?(\d{1,2})[:.](\d{2})", t)
+    if m:
+        posun = {"zitra": 1, "zítra": 1, "pozitri": 2, "pozítří": 2}.get(m.group(1) or "", 0)
+        hod, minuta = int(m.group(2)), int(m.group(3))
+        if hod > 23 or minuta > 59:
+            raise ValueError("neplatný čas")
+        cas = now.replace(hour=hod, minute=minuta)
+        if not m.group(1) and cas <= now:
+            posun = 1
+        return cas + timedelta(days=posun)
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%d.%m.%Y %H:%M"):
+        try:
+            return datetime.strptime(t, fmt)
+        except ValueError:
+            pass
+    raise ValueError("nerozumím času")
+
+
+def novy_ukol(text: str) -> str:
+    m = re.match(r"^(?:nov(?:ý|y|ej)?\s+úkol|nov(?:ý|y|ej)?\s+ukol|"
+                 r"přidej(?:\s+úkol)?|pridej(?:\s+ukol)?|úkol|ukol)\s*[:\-]?\s*",
+                 text, re.IGNORECASE)
+    zbytek = text[m.end():].strip(" ,-") if m else text.strip()
+    if not zbytek:
+        return "Napiš úkol a čas. Třeba: nový úkol zavolat DIS zítra 15:00."
+    slova = zbytek.split()
+    for n in (3, 2, 1):
+        if len(slova) <= n:
+            continue
+        try:
+            termin = _kdy(" ".join(slova[-n:]))
+        except ValueError:
+            continue
+        nazev = " ".join(slova[:-n]).strip(" ,-")
+        if not nazev:
+            break
+        try:
+            notion.vytvor_ukol(nazev, termin)
+        except notion.NotionError as e:
+            return f"Notion: {e}"
+        return f"Přidáno do Notionu: {nazev} – {termin:%d.%m. %H:%M}."
+    return "Nerozumím času. Třeba: nový úkol zavolat DIS zítra 15:00 (nebo +2h)."
+
+
 def odpoved(text: str) -> str:
     t = " ".join(_norm(text).split())
     if t in ("/start", "start", "ahoj", "cau", "nazdar"):
@@ -139,6 +200,8 @@ def odpoved(text: str) -> str:
         except notion.NotionError as e:
             return f"Notion: {e}"
         return f"Hotovo: {nalez[0]['nazev']}."
+    if t.startswith(("novy ukol", "novej ukol", "pridej", "ukol", "novy task")):
+        return novy_ukol(text)
     u = _ukoly()
     if isinstance(u, list):
         nalez = notion.najdi_ukol(u, text)
@@ -170,12 +233,23 @@ def zpracuj(u: dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sekundy", type=int, default=280)
+    ap.add_argument("--okno", default="4-16", help="hodiny Praha, kdy smí běžet (od-do)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     if not chat_id():
         print("chybí TELEGRAM_CHAT_ID", file=sys.stderr)
         return 1
-    konec = time.time() + args.sekundy
+    try:
+        od, do = (int(x) for x in args.okno.split("-"))
+    except ValueError:
+        od, do = 4, 16
+    now = datetime.now(CASOVA_ZONA)
+    if not (od <= now.hour < do):
+        print(f"Mimo okno {od}–{do} Praha ({now:%H:%M}) – končím.")
+        return 0
+    konec_okna = now.replace(hour=do, minute=0, second=0, microsecond=0)
+    zbyva = (konec_okna - now).total_seconds()
+    konec = time.time() + max(30, min(args.sekundy, zbyva))
     offset = 0
     while time.time() < konec:
         try:

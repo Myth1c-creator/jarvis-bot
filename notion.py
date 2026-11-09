@@ -162,6 +162,39 @@ def oznac_failed(page_id: str) -> None:
     zapomen_cache()
 
 
+def vytvor_ukol(nazev: str, termin: datetime) -> str:
+    """Založí úkol v Notionu a vrátí jeho page_id."""
+    telo = {
+        "parent": {"type": "data_source_id", "data_source_id": DATA_SOURCE},
+        "properties": {
+            "Tasks": {"title": [{"text": {"content": nazev[:200]}}]},
+            "Due Date": {"date": {"start": termin.isoformat()}},
+        },
+    }
+    req = urllib.request.Request(
+        API_PAGES, data=json.dumps(telo).encode(), headers=_headers(), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            page = json.load(r)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        raise NotionError(f"Notion HTTP {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise NotionError(f"síťová chyba: {e.reason}") from e
+    zapomen_cache()
+    return page["id"]
+
+
+def archivuj(page_id: str) -> None:
+    """Přesune stránku do koše – používá se hlavně pro testovací úkoly."""
+    req = urllib.request.Request(
+        f"{API_PAGES}/{page_id}", data=json.dumps({"in_trash": True}).encode(),
+        headers=_headers(), method="PATCH")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        r.read()
+    zapomen_cache()
+
+
 def _normalizuj(text: str) -> str:
     t = unicodedata.normalize("NFKD", text)
     return "".join(c for c in t if not unicodedata.combining(c)).lower().strip()
