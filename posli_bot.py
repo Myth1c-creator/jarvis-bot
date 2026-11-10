@@ -35,7 +35,8 @@ POMOC = (
     "• hotovo <název úkolu>\n"
     "• nový úkol zavolat DIS zítra 15:00\n"
     "• nebo napiš název úkolu – najdu ho\n\n"
-    "Připomínky a volný chat umí jen bot na zapnutém PC."
+    "A na cokoliv jiného ti odpovím jako normální chat.\n"
+    "Připomínky 45 min před termínem umí jen bot na zapnutém PC."
 )
 
 
@@ -149,6 +150,63 @@ def novy_ukol(text: str) -> str:
     return "Nerozumím času. Třeba: nový úkol zavolat DIS zítra 15:00 (nebo +2h)."
 
 
+HISTORIE: list = []
+SYSTEM = ("Jsi Jarvis, Ondrův osobní asistent. Odpovídej česky, stručně (max 8 řádků), "
+          "prakticky a bez zbytečných frází. Když něco nevíš, řekni to.")
+
+
+def kontext() -> str:
+    u = _ukoly()
+    if not isinstance(u, list):
+        return ""
+    dnes = datetime.now(CASOVA_ZONA).date()
+
+    def vypis(vyber):
+        return "; ".join(f"{x['termin']:%H:%M} {x['nazev']}" for x in vyber[:8])
+
+    d = sorted((x for x in u if x["termin"].date() == dnes), key=lambda x: x["termin"])
+    z = sorted((x for x in u if x["termin"].date() == dnes + timedelta(days=1)),
+               key=lambda x: x["termin"])
+    casti = []
+    if d:
+        casti.append("Dnes: " + vypis(d))
+    if z:
+        casti.append("Zítra: " + vypis(z))
+    return ("Ondrovy nehotové úkoly z Notionu – " + ". ".join(casti) + ".") if casti else ""
+
+
+def model(text: str) -> str:
+    """Volný chat přes Claude API (funguje i při vypnutém PC)."""
+    klic = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if not klic:
+        return "Volný chat teď nemám (chybí klíč). Napiš „pomoc“."
+    historie = HISTORIE[-6:] + [{"role": "user", "content": text[:4000]}]
+    system = SYSTEM
+    k = kontext()
+    if k:
+        system += "\n" + k
+    telo = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 600,
+                       "system": system, "messages": historie}).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=telo,
+        headers={"x-api-key": klic.strip(), "anthropic-version": "2023-06-01",
+                 "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read())
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        print(f"Claude: {e}", file=sys.stderr, flush=True)
+        return "Model teď neodpověděl. Zkus to znovu."
+    casti = [c.get("text", "") for c in data.get("content", []) if c.get("type") == "text"]
+    odpoved = "\n".join(casti).strip()
+    if not odpoved:
+        return "Model nic nevrátil. Zkus to znovu."
+    HISTORIE.append({"role": "user", "content": text[:4000]})
+    HISTORIE.append({"role": "assistant", "content": odpoved})
+    del HISTORIE[:-8]
+    return odpoved[:3500]
+
+
 def odpoved(text: str) -> str:
     t = " ".join(_norm(text).split())
     if t in ("/start", "start", "ahoj", "cau", "nazdar"):
@@ -209,8 +267,7 @@ def odpoved(text: str) -> str:
             radky = [f"Našel jsem v Notionu ({len(nalez)}):"]
             radky += [f"• {x['termin']:%d.%m. %H:%M} – {x['nazev']}" for x in nalez[:5]]
             return "\n".join(radky)
-    return "Tomu nerozumím (cloud režim). Napiš „pomoc“."
-
+    return model(text)
 
 def zpracuj(u: dict) -> None:
     msg = u.get("message") or {}
