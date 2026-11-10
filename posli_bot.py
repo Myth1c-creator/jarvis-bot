@@ -7,9 +7,11 @@ Zpracuje zprávy, které přišly, odpoví a skončí. Spouští ho workflow
   python3 posli_bot.py --dry-run         # jen vypiš, co by přišlo
 
 Příkazy: briefing, dnes, zítra, týden, kolik mám úkolů, hotovo <název>, pomoc.
-Volný chat (OpenCode) umí jen lokální bot na zapnutém PC.
+Fotka/screenshot s úkoly: přečte ji Claude vision, „zapiš“ je založí v Notionu.
+Volný chat (Claude) umí oba boti; připomínky jen lokální bot na zapnutém PC.
 """
 import argparse
+import base64
 import json
 import os
 import re
@@ -34,6 +36,7 @@ POMOC = (
     "• kolik mám úkolů\n"
     "• hotovo <název úkolu>\n"
     "• nový úkol zavolat DIS zítra 15:00\n"
+    "• pošli fotku/screenshot s úkoly – přečtu je a „zapiš“ je založí\n"
     "• nebo napiš název úkolu – najdu ho\n\n"
     "A na cokoliv jiného ti odpovím jako normální chat.\n"
     "Připomínky 45 min před termínem umí jen bot na zapnutém PC."
@@ -177,6 +180,152 @@ def kontext() -> str:
     return ("Ondrovy nehotové úkoly z Notionu – " + ". ".join(casti) + ".") if casti else ""
 
 
+def stahni(file_id: str, limit_mb: int = 15) -> bytes:
+    """Stáhne soubor z Telegramu (fotka, screenshot)."""
+    info = tg("getFile", {"file_id": file_id})
+    cesta = (info.get("result") or {}).get("file_path")
+    if not cesta:
+        raise RuntimeError("getFile: chybí file_path")
+    url = f"https://api.telegram.org/file/bot{token()}/{cesta}"
+    with urllib.request.urlopen(url, timeout=120) as r:
+        data = r.read(limit_mb * 1024 * 1024 + 1)
+    if len(data) > limit_mb * 1024 * 1024:
+        raise RuntimeError(f"soubor je větší než {limit_mb} MB")
+    return data
+
+
+def _mime(data: bytes) -> str:
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _pocet(n: int, jeden: str, malo: str, hodne: str) -> str:
+    if n == 1:
+        return f"{n} {jeden}"
+    if 2 <= n <= 4:
+        return f"{n} {malo}"
+    return f"{n} {hodne}"
+
+
+def vision(data: bytes, mime: str, dotaz: str) -> str:
+    """Přečte obrázek přes Claude (Fable 5.2); prázdné = nevyšlo."""
+    klic = (os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not klic:
+        return ""
+    telo = json.dumps({
+        "model": "claude-fable-5-2", "max_tokens": 1500,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": mime,
+                                         "data": base64.b64encode(data).decode()}},
+            {"type": "text", "text": dotaz}]}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=telo,
+        headers={"x-api-key": klic, "anthropic-version": "2023-06-01",
+                 "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            odp = json.loads(r.read())
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        print(f"vision: {e}", file=sys.stderr, flush=True)
+        return ""
+    casti = [c.get("text", "") for c in odp.get("content", []) if c.get("type") == "text"]
+    return "\n".join(casti).strip()
+
+
+FOTO_DOTAZ = (
+    "Podívej se na obrázek a najdi na něm úkoly, termíny nebo poznámky. "
+    "Vrať POUZE JSON, bez markdown bloků:\n"
+    '{"ukoly": [{"nazev": "krátký název česky", "termin": "2026-11-11T15:00"}], '
+    '"poznamka": "jedna věta, co na obrázku je"}\n'
+    "Když termín chybí, dej termin null. Když žádné úkoly nejsou, vrať prázdný seznam."
+)
+
+CEKA_NA_ZAPIS: list = []
+
+
+def foto(msg: dict) -> str:
+    """Fotka/screenshot → přečte úkoly a nabídne jejich založení."""
+    fota = msg.get("photo") or []
+    dok = msg.get("document") or {}
+    try:
+        if fota:
+            file_id = max(fota, key=lambda f: f.get("file_size", 0))["file_id"]
+        elif str(dok.get("mime_type", "")).startswith("image/"):
+            file_id = dok["file_id"]
+        else:
+            return ""
+        data = stahni(file_id)
+    except (RuntimeError, urllib.error.URLError) as e:
+        return f"Obrázek se nepodařilo načíst: {e}"
+    pisni()
+    odpoved = vision(data, _mime(data), FOTO_DOTAZ)
+    if not odpoved:
+        return "Model obrázek nepřečetl. Zkus to znovu."
+    cisty = odpoved.strip().strip("`")
+    if cisty.lower().startswith("json"):
+        cisty = cisty[4:].strip()
+    try:
+        vysledek = json.loads(cisty[cisty.index("{"):cisty.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return odpoved[:1500]
+    ukoly = vysledek.get("ukoly") or []
+    poznamka = (vysledek.get("poznamka") or "").strip()
+    if not ukoly:
+        return f"Na obrázku nevidím žádné úkoly. {poznamka}".strip()
+    CEKA_NA_ZAPIS.clear()
+    radky = [f"Na obrázku vidím {_pocet(len(ukoly), 'úkol', 'úkoly', 'úkolů')}:"]
+    for u in ukoly[:12]:
+        nazev = (u.get("nazev") or "").strip()
+        termin = (u.get("termin") or "").strip()
+        ukaz = "bez termínu"
+        if termin:
+            try:
+                ukaz = f"{datetime.fromisoformat(termin.replace('Z', '')):%d.%m. %H:%M}"
+            except ValueError:
+                ukaz = termin
+        radky.append(f"• {nazev} – {ukaz}")
+        CEKA_NA_ZAPIS.append((nazev, termin))
+    radky.append("")
+    radky.append("Napiš „zapiš“ a založím je do Notionu.")
+    if poznamka:
+        radky.append(f"({poznamka})")
+    return "\n".join(radky)[:3500]
+
+
+def zapis_z_fotky() -> str:
+    if not CEKA_NA_ZAPIS:
+        return "Nemám co zapsat – pošli nejdřív fotku s úkoly."
+    hotovo, chyby = [], 0
+    for nazev, termin in CEKA_NA_ZAPIS:
+        if not nazev or not termin:
+            chyby += 1
+            continue
+        try:
+            cas = datetime.fromisoformat(str(termin).replace("Z", ""))
+        except ValueError:
+            chyby += 1
+            continue
+        try:
+            notion.vytvor_ukol(nazev, cas)
+            hotovo.append(f"• {nazev} – {cas:%d.%m. %H:%M}")
+        except notion.NotionError as e:
+            print(f"notion: {e}", file=sys.stderr, flush=True)
+            chyby += 1
+    CEKA_NA_ZAPIS.clear()
+    if not hotovo:
+        return "Nic jsem nezaložil – u úkolů chyběl čitelný termín."
+    text = f"Založeno {_pocet(len(hotovo), 'úkol', 'úkoly', 'úkolů')}:\n" + "\n".join(hotovo)
+    if chyby:
+        text += f"\n{chyby} jsem přeskočil (chyběl termín nebo Notion zlobil)."
+    return text
+
+
 def model(text: str) -> str:
     """Volný chat přes Claude API (funguje i při vypnutém PC)."""
     klic = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")
@@ -215,6 +364,8 @@ def odpoved(text: str) -> str:
         return "Jarvis na příjmu (cloud).\n" + POMOC
     if t in ("pomoc", "help", "/help", "co umis"):
         return POMOC
+    if t in ("zapis", "zapis to", "uloz", "uloz to", "zapis vse"):
+        return zapis_z_fotky()
     if "briefing" in t:
         u = _ukoly()
         return f"Notion: {u}" if not isinstance(u, list) else notion.sestav_prehled(u)
@@ -271,6 +422,7 @@ def odpoved(text: str) -> str:
             return "\n".join(radky)
     return model(text)
 
+
 def zpracuj(u: dict) -> None:
     msg = u.get("message") or {}
     if str((msg.get("chat") or {}).get("id", "")) != chat_id():
@@ -279,6 +431,13 @@ def zpracuj(u: dict) -> None:
     if kdy and time.time() - kdy > 900:
         return
     text = (msg.get("text") or "").strip()
+    if not text and (msg.get("photo") or msg.get("document")):
+        print("prijem: obrazek", flush=True)
+        try:
+            posli(foto(msg))
+        except RuntimeError as e:
+            print(f"telegram: {e}", file=sys.stderr, flush=True)
+        return
     if not text:
         return
     print(f"prijem: {len(text)} znaku", flush=True)
