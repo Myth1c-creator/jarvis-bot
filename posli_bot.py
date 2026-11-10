@@ -292,10 +292,15 @@ def main() -> int:
     ap.add_argument("--sekundy", type=int, default=280)
     ap.add_argument("--okno", default="4-16", help="hodiny Praha, kdy smí běžet (od-do)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--zkouska", default="", help="pošli zkušební odpověď modelu a skonči")
     args = ap.parse_args()
     if not chat_id():
         print("chybí TELEGRAM_CHAT_ID", file=sys.stderr)
         return 1
+    if args.zkouska:
+        posli(model(args.zkouska))
+        print("Zkušební odpověď odeslána.")
+        return 0
     try:
         od, do = (int(x) for x in args.okno.split("-"))
     except ValueError:

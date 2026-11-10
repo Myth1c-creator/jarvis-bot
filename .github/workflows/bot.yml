@@ -5,6 +5,11 @@ on:
     # každou hodinu v noci/odpoledne; běh trvá až 5 h 40 min a hlídá si okno 4–16 Praha
     - cron: "0 2-15 * * 1-5"
   workflow_dispatch:
+    inputs:
+      zkouska:
+        description: "Zkušební dotaz na model (odešle odpověď a skončí)"
+        type: string
+        default: ""
 
 concurrency:
   group: jarvis-bot
@@ -26,4 +31,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
-        run: python3 posli_bot.py --sekundy 20400 --okno 4-16
+          ZKOUSKA: ${{ inputs.zkouska }}
+        run: |
+          if [ -n "$ZKOUSKA" ]; then
+            python3 posli_bot.py --zkouska "$ZKOUSKA"
+          else
+            python3 posli_bot.py --sekundy 20400 --okno 4-16
+          fi
