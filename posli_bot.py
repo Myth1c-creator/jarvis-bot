@@ -164,7 +164,9 @@ def kontext() -> str:
     def vypis(vyber):
         return "; ".join(f"{x['termin']:%H:%M} {x['nazev']}" for x in vyber[:8])
 
-    d = sorted((x for x in u if x["termin"].date() == dnes), key=lambda x: x["termin"])
+    ted = datetime.now(CASOVA_ZONA)
+    d = sorted((x for x in u if x["termin"].date() == dnes and x["termin"] >= ted),
+               key=lambda x: x["termin"])
     z = sorted((x for x in u if x["termin"].date() == dnes + timedelta(days=1)),
                key=lambda x: x["termin"])
     casti = []
