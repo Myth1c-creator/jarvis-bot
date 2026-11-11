@@ -1,6 +1,7 @@
 import contextlib
 import io
 import unittest
+import urllib.error
 from datetime import datetime
 from unittest.mock import patch
 
@@ -52,7 +53,7 @@ class BotTests(unittest.TestCase):
                 posli.assert_called_once()
                 self.assertTrue(posli.call_args.args[0].strip())
                 if druh in ('voice', 'audio'):
-                    self.assertIn('zapnutém PC', posli.call_args.args[0])
+                    self.assertEqual(posli.call_args.args[0], 'Hlasovku v cloudu nepřepíšu – napiš to prosím textem.')
 
     def test_obrazek_zustava_podporovany(self):
         with patch.object(bot, 'foto', return_value='OBRAZEK') as foto:
@@ -115,6 +116,51 @@ class BotTests(unittest.TestCase):
             self.assertEqual(tg.call_count, 1)
             self.assertIn('2 novych zprav', out.getvalue())
             self.assertIn('zpráv 2, bez odpovědi 1', out.getvalue())
+            self.assertIn('konflikt: ne', out.getvalue())
+
+    def test_pozdrav_hranice(self):
+        for hour, expected in ((3,'Dobrý večer'),(4,'Dobré ráno'),(9,'Dobré ráno'),
+                               (10,'Dobré dopoledne'),(11,'Dobré dopoledne'),
+                               (12,'Dobré odpoledne'),(17,'Dobré odpoledne'),(18,'Dobrý večer')):
+            with self.subTest(hour=hour):
+                self.assertEqual(bot.notion._pozdrav(datetime(2026,11,11,hour)), expected)
+
+    def test_prehled_pouziva_prazsky_cas(self):
+        with patch.object(bot.notion, 'datetime') as dt:
+            dt.now.return_value = datetime(2026,11,11,12,tzinfo=bot.CASOVA_ZONA)
+            self.assertTrue(bot.notion.sestav_prehled([]).startswith('Dobré odpoledne, Ondro.'))
+            for call in dt.now.call_args_list:
+                self.assertEqual(call.args, (bot.CASOVA_ZONA,))
+
+    def test_409_ukonci_bez_zpravy_a_bez_opakovani(self):
+        with patch.object(bot, 'datetime') as dt, patch.object(bot, 'token', return_value='offline'), patch.object(bot.urllib.request, 'urlopen', side_effect=urllib.error.HTTPError('offline',409,'Conflict',{},None)) as net, patch.object(bot, 'posli') as posli, patch.object(bot.time, 'sleep') as sleep, patch('sys.argv', ['bot','--diagnostika']), contextlib.redirect_stdout(io.StringIO()) as out:
+            dt.now.return_value = datetime(2026,11,11,12,tzinfo=bot.CASOVA_ZONA)
+            self.assertEqual(bot.main(), 0)
+            self.assertEqual(net.call_count, 1)
+            posli.assert_not_called()
+            sleep.assert_not_called()
+            self.assertIn('lokální bot poslouchá – končím', out.getvalue())
+            self.assertIn('konflikt: ano', out.getvalue())
+
+    def test_jine_chyby_dal_opakuji(self):
+        for error in (urllib.error.HTTPError('offline',429,'Rate',{},io.BytesIO(b'{}')),
+                      urllib.error.HTTPError('offline',503,'Unavailable',{},io.BytesIO(b'{}')),
+                      urllib.error.URLError('offline')):
+            with self.subTest(error=type(error).__name__), patch.object(bot, 'datetime') as dt, patch.object(bot, 'token', return_value='offline'), patch.object(bot.urllib.request, 'urlopen', side_effect=[error,urllib.error.HTTPError('offline',409,'Conflict',{},None)]) as net, patch.object(bot.time, 'sleep') as sleep, patch('sys.argv', ['bot']), contextlib.redirect_stdout(io.StringIO()):
+                dt.now.return_value = datetime(2026,11,11,12,tzinfo=bot.CASOVA_ZONA)
+                self.assertEqual(bot.main(),0)
+                self.assertEqual(net.call_count,2)
+                sleep.assert_called_once()
+
+    def test_hlasovka_se_nestahuje_ani_neprepisuje(self):
+        with patch.object(bot,'stahni') as stahni, patch.object(bot,'posli') as posli, patch.object(bot,'model') as model:
+            for typ in ('voice','audio'):
+                self.assertTrue(bot.zpracuj({'message': {'chat': {'id': 123},typ: {'file_id': 'offline'}}}))
+            stahni.assert_not_called()
+            model.assert_not_called()
+            self.assertEqual(posli.call_count,2)
+            for call in posli.call_args_list:
+                self.assertEqual(call.args[0],'Hlasovku v cloudu nepřepíšu – napiš to prosím textem.')
 
 
 if __name__ == '__main__':

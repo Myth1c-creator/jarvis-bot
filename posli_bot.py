@@ -54,6 +54,10 @@ def chat_id() -> str:
     return (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
 
 
+class KonfliktPoslechu(RuntimeError):
+    """Jiný bot právě poslouchá getUpdates."""
+
+
 def tg(method: str, data: dict | None = None, timeout: int = 60) -> dict:
     url = API.format(token=token(), method=method)
     req = urllib.request.Request(
@@ -63,6 +67,8 @@ def tg(method: str, data: dict | None = None, timeout: int = 60) -> dict:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
+        if method == "getUpdates" and e.code == 409:
+            raise KonfliktPoslechu("lokální bot poslouchá – končím") from None
         telo = e.read().decode("utf-8", errors="replace")[:200]
         raise RuntimeError(f"Telegram HTTP {e.code}: {telo}") from e
     except urllib.error.URLError as e:
@@ -439,7 +445,7 @@ def zprava(msg: dict) -> str:
     if msg.get("date") and time.time() - msg["date"] > 900:
         return "Zpráva dorazila se zpožděním přes 15 minut – pošli ji prosím znovu."
     if any(k in msg for k in ("voice", "audio")):
-        return "Hlasovku přepíše bot na zapnutém PC – v cloudu prosím napiš úkol."
+        return "Hlasovku v cloudu nepřepíšu – napiš to prosím textem."
     if any(k in msg for k in ("video", "video_note", "animation")):
         return "Video v cloudu nepřečtu – pošli screenshot nebo napiš úkol."
     if "sticker" in msg:
@@ -502,10 +508,11 @@ def main() -> int:
     if not v_okne(now, od, do):
         print(f"Mimo okno {od}–{do} Praha ({now:%H:%M}) – končím.")
         if args.diagnostika:
-            print("diagnostika: poslech 0.0 s, zpráv 0, bez odpovědi 0")
+            print("diagnostika: poslech 0.0 s, zpráv 0, bez odpovědi 0, konflikt: ne")
         return 0
     start = time.monotonic()
     konec = start + max(0, args.sekundy)
+    konflikt = False
     offset = prijato = bez_odpovedi = 0
     try:
         while time.monotonic() < konec:
@@ -520,6 +527,10 @@ def main() -> int:
                 data = tg("getUpdates", {"offset": offset, "timeout": min(45, int(zbyva)),
                                          "limit": 10, "allowed_updates": ["message"]},
                           timeout=min(60, max(1, zbyva)))
+            except KonfliktPoslechu:
+                konflikt = True
+                print("lokální bot poslouchá – končím", flush=True)
+                return 0
             except Exception as e:
                 print(f"cyklus {now:%H:%M:%S} Praha, chyba {type(e).__name__}", flush=True)
                 time.sleep(min(5, max(0, zbyva)))
@@ -543,12 +554,16 @@ def main() -> int:
         if offset and v_okne(datetime.now(CASOVA_ZONA), od, do):
             try:
                 tg("getUpdates", {"offset": offset, "timeout": 0, "limit": 1}, timeout=1)
+            except KonfliktPoslechu:
+                konflikt = True
+                print("lokální bot poslouchá – končím", flush=True)
             except Exception:
                 pass
     finally:
         if args.diagnostika:
             print(f"diagnostika: poslech {time.monotonic() - start:.1f} s, "
-                  f"zpráv {prijato}, bez odpovědi {bez_odpovedi}", flush=True)
+                  f"zpráv {prijato}, bez odpovědi {bez_odpovedi}, "
+                  f"konflikt: {'ano' if konflikt else 'ne'}", flush=True)
     return 0
 
 

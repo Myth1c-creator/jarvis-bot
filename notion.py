@@ -220,13 +220,25 @@ def _radek(u: dict, s_datem: bool = False) -> str:
     return f"• {_cas(u)} – {u['nazev']}"
 
 
+def _pozdrav(ted: datetime | None = None) -> str:
+    """Pozdrav podle denní doby – „dobré ráno“ jen ráno."""
+    hod = (ted or datetime.now(CASOVA_ZONA)).hour
+    if 4 <= hod < 10:
+        return "Dobré ráno"
+    if 10 <= hod < 12:
+        return "Dobré dopoledne"
+    if 12 <= hod < 18:
+        return "Dobré odpoledne"
+    return "Dobrý večer"
+
+
 def sestav_prehled(ukoly: list[dict], dnes: date | None = None,
                    zitra: bool = True, tyden: bool = True) -> str:
     """Ranní zpráva: dnes + zítra + tento týden + propadlé za 7 dní."""
     dnes = dnes or datetime.now(CASOVA_ZONA).date()
     dnesni = sorted((u for u in ukoly if u["termin"].date() == dnes),
                     key=lambda u: u["termin"])
-    radky = [f"Dobré ráno, Ondro. Dnes je {DNY[dnes.weekday()]} {dnes.day}. {dnes.month}.", ""]
+    radky = [f"{_pozdrav()}, Ondro. Dnes je {DNY[dnes.weekday()]} {dnes.day}. {dnes.month}.", ""]
 
     if dnesni:
         radky.append(f"Dnes ({len(dnesni)}):")
