@@ -480,6 +480,25 @@ def zpracuj(u: dict) -> bool | None:
         return False
 
 
+REPO = os.environ.get("JARVIS_REPO") or "Myth1c-creator/jarvis-bot"
+TEP_URL = os.environ.get("JARVIS_HEARTBEAT_URL") or \
+    f"https://raw.githubusercontent.com/{REPO}/heartbeat/heartbeat.json"
+TEP_STARI = 180  # sekund; když je tep starší, lokální bot nežije
+
+
+def lokal_zije(limit: int = TEP_STARI) -> bool:
+    """Přečte srdeční tep lokálního bota. Čerstvý tep = PC poslouchá, cloud mlčí."""
+    try:
+        with urllib.request.urlopen(TEP_URL, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        cas = datetime.fromisoformat(str(data["cas"]))
+        if cas.tzinfo is None:
+            cas = cas.replace(tzinfo=CASOVA_ZONA)
+        return (datetime.now(CASOVA_ZONA) - cas).total_seconds() < limit
+    except Exception:
+        return False
+
+
 CELY_DEN = (0, 23)
 
 
@@ -519,6 +538,7 @@ def main() -> int:
     start = time.monotonic()
     konec = start + max(0, args.sekundy)
     konflikt = False
+    minuly_tep = None
     offset = prijato = bez_odpovedi = 0
     try:
         while time.monotonic() < konec:
@@ -531,6 +551,13 @@ def main() -> int:
                             (now.replace(hour=do, minute=0, second=0, microsecond=0) - now).total_seconds())
             if zbyva < 1:
                 break
+            if lokal_zije():
+                # PC je zapnuté a lokální bot poslouchá – cloud do toho nemluví.
+                if minuly_tep is None or time.monotonic() - minuly_tep > 600:
+                    print(f"{datetime.now(CASOVA_ZONA):%H:%M:%S} lokální bot žije – čekám", flush=True)
+                    minuly_tep = time.monotonic()
+                time.sleep(min(30, max(0, zbyva)))
+                continue
             try:
                 data = tg("getUpdates", {"offset": offset, "timeout": min(45, int(zbyva)),
                                          "limit": 10, "allowed_updates": ["message"]},

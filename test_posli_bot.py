@@ -1,8 +1,9 @@
 import contextlib
 import io
+import json
 import unittest
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ class BotTests(unittest.TestCase):
             ('chat_id', {'return_value': '123'}),
             ('notion.nacti_ukoly', {'return_value': []}),
             ('model', {'return_value': ''}),
+            ('lokal_zije', {'return_value': False}),
         ):
             target = patch('posli_bot.' + name, **kwargs)
             target.start()
@@ -178,6 +180,39 @@ class BotTests(unittest.TestCase):
             self.assertEqual(net.call_count, 1)
             self.assertNotIn('Mimo okno', out.getvalue())
             self.assertIn('konflikt: ano', out.getvalue())
+
+
+class TepTests(unittest.TestCase):
+    """Srdeční tep lokálního bota: čerstvý = cloud neposlouchá."""
+
+    def _tep(self, posun: int) -> bytes:
+        cas = datetime.now(bot.CASOVA_ZONA) + timedelta(seconds=posun)
+        return json.dumps({'cas': cas.isoformat(timespec='seconds')}).encode()
+
+    def test_cerstvy_tep_znamena_lokalni_bot_zije(self):
+        with patch.object(bot.urllib.request, 'urlopen', return_value=io.BytesIO(self._tep(-30))):
+            self.assertTrue(bot.lokal_zije())
+
+    def test_stary_tep_znamena_pc_spi(self):
+        with patch.object(bot.urllib.request, 'urlopen', return_value=io.BytesIO(self._tep(-600))):
+            self.assertFalse(bot.lokal_zije())
+
+    def test_chybejici_tep_je_false(self):
+        with patch.object(bot.urllib.request, 'urlopen',
+                          side_effect=urllib.error.URLError('offline')):
+            self.assertFalse(bot.lokal_zije())
+
+    def test_kdyz_lokal_zije_cloud_vubec_neposloucha(self):
+        with patch.object(bot, 'lokal_zije', return_value=True), \
+                patch.object(bot, 'chat_id', return_value='123'), \
+                patch.object(bot, 'token', return_value='offline'), \
+                patch.object(bot.urllib.request, 'urlopen') as net, \
+                patch.object(bot.time, 'sleep'), \
+                patch('sys.argv', ['bot', '--sekundy', '1', '--diagnostika']), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(bot.main(), 0)
+            net.assert_not_called()
+            self.assertIn('lokální bot žije', out.getvalue())
 
 
 class WorkflowTests(unittest.TestCase):
