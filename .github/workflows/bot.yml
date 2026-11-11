@@ -32,6 +32,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+          # PAT slouží i ke čtení srdečního tepu (vyšší limit API než bez tokenu).
+          PAT: ${{ secrets.PAT }}
           ZKOUSKA: ${{ inputs.zkouska }}
         run: |
           if [ -n "$ZKOUSKA" ]; then

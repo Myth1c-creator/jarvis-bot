@@ -481,16 +481,37 @@ def zpracuj(u: dict) -> bool | None:
 
 
 REPO = os.environ.get("JARVIS_REPO") or "Myth1c-creator/jarvis-bot"
+TEP_VETEV = "heartbeat"
+# Pozor: raw.githubusercontent.com je CDN a content se zpožďuje až minuty,
+# proto se tep čte přes API (a když to selže, zkusí se raw jako záloha).
 TEP_URL = os.environ.get("JARVIS_HEARTBEAT_URL") or \
-    f"https://raw.githubusercontent.com/{REPO}/heartbeat/heartbeat.json"
-TEP_STARI = 180  # sekund; když je tep starší, lokální bot nežije
+    f"https://api.github.com/repos/{REPO}/contents/heartbeat.json?ref={TEP_VETEV}"
+TEP_RAW = f"https://raw.githubusercontent.com/{REPO}/{TEP_VETEV}/heartbeat.json"
+TEP_TOKEN = os.environ.get("PAT") or os.environ.get("JARVIS_PAT") or ""
+TEP_STARI = 420  # sekund; lokální bot píše tep každých 300 s, rezerva 2 min
+
+
+def _obsah_tepu() -> dict:
+    """Přečte heartbeat.json – primárně přes API, při chybě přes raw (může být zpožděný)."""
+    try:
+        hlavicky = {"Accept": "application/vnd.github+json", "User-Agent": "jarvis-bot"}
+        if TEP_TOKEN:
+            hlavicky["Authorization"] = f"Bearer {TEP_TOKEN}"
+        req = urllib.request.Request(TEP_URL, headers=hlavicky)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        if isinstance(data, dict) and "content" in data:
+            data = json.loads(base64.b64decode(data["content"]).decode("utf-8"))
+        return data
+    except Exception:
+        with urllib.request.urlopen(TEP_RAW, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8"))
 
 
 def lokal_zije(limit: int = TEP_STARI) -> bool:
     """Přečte srdeční tep lokálního bota. Čerstvý tep = PC poslouchá, cloud mlčí."""
     try:
-        with urllib.request.urlopen(TEP_URL, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
+        data = _obsah_tepu()
         cas = datetime.fromisoformat(str(data["cas"]))
         if cas.tzinfo is None:
             cas = cas.replace(tzinfo=CASOVA_ZONA)

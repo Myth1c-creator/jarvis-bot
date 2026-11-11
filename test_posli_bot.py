@@ -1,4 +1,5 @@
 import contextlib
+import base64
 import io
 import json
 import unittest
@@ -201,6 +202,18 @@ class TepTests(unittest.TestCase):
         with patch.object(bot.urllib.request, 'urlopen',
                           side_effect=urllib.error.URLError('offline')):
             self.assertFalse(bot.lokal_zije())
+
+    def test_api_odpoved_se_dekoduje(self):
+        telo = {'content': base64.b64encode(self._tep(-20)).decode()}
+        with patch.object(bot.urllib.request, 'urlopen',
+                          return_value=io.BytesIO(json.dumps(telo).encode())):
+            self.assertTrue(bot.lokal_zije())
+
+    def test_kdyz_api_selze_zkusi_raw(self):
+        with patch.object(bot.urllib.request, 'urlopen',
+                          side_effect=[urllib.error.URLError('offline'),
+                                       io.BytesIO(self._tep(-20))]):
+            self.assertTrue(bot.lokal_zije())
 
     def test_kdyz_lokal_zije_cloud_vubec_neposloucha(self):
         with patch.object(bot, 'lokal_zije', return_value=True), \
