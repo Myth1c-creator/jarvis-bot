@@ -1,7 +1,7 @@
 """Jarvis – cloudový Telegram bot (běží na GitHub Actions, PC může být vypnutý).
 
 Zpracuje zprávy, které přišly, odpoví a skončí. Spouští ho workflow
-`.github/workflows/bot.yml` každých 5 minut (Po–Pá 4:00–16:00 Praha).
+`.github/workflows/bot.yml` každých 10 minut (Po–Pá 4:00–17:00 Praha).
 
   python3 posli_bot.py --sekundy 280     # poslouchej a odpovídej
   python3 posli_bot.py --dry-run         # jen vypiš, co by přišlo
@@ -69,7 +69,15 @@ def tg(method: str, data: dict | None = None, timeout: int = 60) -> dict:
         raise RuntimeError(f"Telegram: {e.reason}") from e
 
 
+FALLBACK = "Nerozuměl jsem – napiš „pomoc“ a vypíšu, co umím."
+
+
+def neprázdná(text: str) -> str:
+    return text if text and text.strip() else FALLBACK
+
+
 def posli(text: str) -> None:
+    text = neprázdná(text)
     for cast in [text[i:i + 3800] for i in range(0, len(text), 3800)] or [text]:
         tg("sendMessage", {"chat_id": chat_id(), "text": cast,
                            "disable_web_page_preview": True})
@@ -366,20 +374,24 @@ def odpoved(text: str) -> str:
         return POMOC
     if t in ("zapis", "zapis to", "uloz", "uloz to", "zapis vse"):
         return zapis_z_fotky()
+    if t.startswith(("novy ukol", "novej ukol", "pridej", "ukol ", "novy task")):
+        return novy_ukol(text)
+    prehled = not t.startswith(("hotovo", "splneno"))
+    slova = set(re.findall(r"\w+", t))
     if "briefing" in t:
         u = _ukoly()
         return f"Notion: {u}" if not isinstance(u, list) else notion.sestav_prehled(u)
-    if t in ("dnes", "co mam dnes", "co me dnes ceka", "dnesni ukoly"):
+    if prehled and slova & {"dnes", "dneska", "dnesni"}:
         u = _ukoly()
         return f"Notion: {u}" if not isinstance(u, list) else \
             notion.sestav_prehled(u, zitra=False, tyden=False)
-    if t.startswith(("zitra", "co mam zitra", "zitrejsi")):
+    if prehled and slova & {"zitra", "zitrejsi"}:
         u = _ukoly()
         if not isinstance(u, list):
             return f"Notion: {u}"
         d = datetime.now(CASOVA_ZONA).date()
         return notion.sestav_rozsah(u, d + timedelta(days=1), d + timedelta(days=1), "Zítra")
-    if "tyden" in t:
+    if prehled and "tyden" in slova:
         u = _ukoly()
         if not isinstance(u, list):
             return f"Notion: {u}"
@@ -420,83 +432,123 @@ def odpoved(text: str) -> str:
             radky = [f"Našel jsem v Notionu ({len(nalez)}):"]
             radky += [f"• {x['termin']:%d.%m. %H:%M} – {x['nazev']}" for x in nalez[:5]]
             return "\n".join(radky)
-    return model(text)
+    return neprázdná(model(text))
 
 
-def zpracuj(u: dict) -> None:
+def zprava(msg: dict) -> str:
+    if msg.get("date") and time.time() - msg["date"] > 900:
+        return "Zpráva dorazila se zpožděním přes 15 minut – pošli ji prosím znovu."
+    if any(k in msg for k in ("voice", "audio")):
+        return "Hlasovku přepíše bot na zapnutém PC – v cloudu prosím napiš úkol."
+    if any(k in msg for k in ("video", "video_note", "animation")):
+        return "Video v cloudu nepřečtu – pošli screenshot nebo napiš úkol."
+    if "sticker" in msg:
+        return "Samolepku v cloudu nepřečtu – pošli screenshot nebo napiš úkol."
+    dok = msg.get("document") or {}
+    if msg.get("photo") or str(dok.get("mime_type", "")).startswith("image/"):
+        return neprázdná(foto(msg))
+    if "document" in msg:
+        return "Tento dokument v cloudu nepřečtu – pošli screenshot nebo napiš úkol."
+    text = (msg.get("text") or "").strip()
+    if text:
+        return neprázdná(odpoved(text))
+    return "Tento typ zprávy v cloudu nepřečtu – napiš úkol nebo pošli screenshot."
+
+
+def zpracuj(u: dict) -> bool | None:
+    """True = odpovězeno, False = selhalo odeslání, None = cizí chat."""
     msg = u.get("message") or {}
     if str((msg.get("chat") or {}).get("id", "")) != chat_id():
-        return
-    kdy = msg.get("date")
-    if kdy and time.time() - kdy > 900:
-        return
-    text = (msg.get("text") or "").strip()
-    if not text and (msg.get("photo") or msg.get("document")):
-        print("prijem: obrazek", flush=True)
-        try:
-            posli(foto(msg))
-        except RuntimeError as e:
-            print(f"telegram: {e}", file=sys.stderr, flush=True)
-        return
-    if not text:
-        return
-    print(f"prijem: {len(text)} znaku", flush=True)
-    pisni()
+        return None
     try:
-        posli(odpoved(text))
-    except RuntimeError as e:
-        print(f"telegram: {e}", file=sys.stderr, flush=True)
+        odp = zprava(msg)
+    except Exception as e:
+        print(f"zpracovani: {type(e).__name__}", file=sys.stderr, flush=True)
+        odp = "Zprávu se nepodařilo zpracovat – zkus to prosím znovu."
+    try:
+        posli(neprázdná(odp))
+        return True
+    except Exception as e:
+        print(f"odeslani: {type(e).__name__}", file=sys.stderr, flush=True)
+        return False
+
+
+def v_okne(now: datetime, od: int, do: int) -> bool:
+    return now.weekday() < 5 and od <= now.hour < do
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sekundy", type=int, default=280)
-    ap.add_argument("--okno", default="4-16", help="hodiny Praha, kdy smí běžet (od-do)")
+    ap.add_argument("--okno", default="4-17", help="hodiny Praha, kdy smí běžet (od-do)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--diagnostika", action="store_true", help="vypíše dobu poslechu a počty zpráv")
     ap.add_argument("--zkouska", default="", help="pošli zkušební odpověď modelu a skonči")
     args = ap.parse_args()
     if not chat_id():
         print("chybí TELEGRAM_CHAT_ID", file=sys.stderr)
         return 1
     if args.zkouska:
-        posli(model(args.zkouska))
+        posli(neprázdná(model(args.zkouska)))
         print("Zkušební odpověď odeslána.")
         return 0
     try:
         od, do = (int(x) for x in args.okno.split("-"))
+        if not 0 <= od < do <= 23:
+            raise ValueError()
     except ValueError:
-        od, do = 4, 16
+        ap.error("okno musí být od-do, 0 <= od < do <= 23")
     now = datetime.now(CASOVA_ZONA)
-    if not (od <= now.hour < do):
+    if not v_okne(now, od, do):
         print(f"Mimo okno {od}–{do} Praha ({now:%H:%M}) – končím.")
+        if args.diagnostika:
+            print("diagnostika: poslech 0.0 s, zpráv 0, bez odpovědi 0")
         return 0
-    konec_okna = now.replace(hour=do, minute=0, second=0, microsecond=0)
-    zbyva = (konec_okna - now).total_seconds()
-    konec = time.time() + max(30, min(args.sekundy, zbyva))
-    offset = 0
-    while time.time() < konec:
-        try:
-            data = tg("getUpdates", {"offset": offset, "timeout": 45, "limit": 10,
-                                     "allowed_updates": ["message"]}, timeout=60)
-        except RuntimeError as e:
-            print(e, file=sys.stderr, flush=True)
-            time.sleep(5)
-            continue
-        for u in data.get("result", []):
-            offset = u["update_id"] + 1
-            if args.dry_run:
-                print(f"DRY-RUN update {u['update_id']}", flush=True)
-                continue
+    start = time.monotonic()
+    konec = start + max(0, args.sekundy)
+    offset = prijato = bez_odpovedi = 0
+    try:
+        while time.monotonic() < konec:
+            now = datetime.now(CASOVA_ZONA)
+            if not v_okne(now, od, do):
+                break
+            zbyva = min(konec - time.monotonic(),
+                        (now.replace(hour=do, minute=0, second=0, microsecond=0) - now).total_seconds())
+            if zbyva < 1:
+                break
             try:
-                zpracuj(u)
-            except Exception as e:  # jedna zpráva nesmí shodit běh
-                print(f"chyba: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-    # potvrdit, co jsme viděli, ať se to příště neopakuje
-    if offset:
-        try:
-            tg("getUpdates", {"offset": offset, "timeout": 0, "limit": 1}, timeout=20)
-        except RuntimeError:
-            pass
+                data = tg("getUpdates", {"offset": offset, "timeout": min(45, int(zbyva)),
+                                         "limit": 10, "allowed_updates": ["message"]},
+                          timeout=min(60, max(1, zbyva)))
+            except Exception as e:
+                print(f"cyklus {now:%H:%M:%S} Praha, chyba {type(e).__name__}", flush=True)
+                time.sleep(min(5, max(0, zbyva)))
+                continue
+            updates = data.get("result", [])
+            print(f"cyklus {datetime.now(CASOVA_ZONA):%H:%M:%S} Praha, {len(updates)} novych zprav", flush=True)
+            for u in updates:
+                if not v_okne(datetime.now(CASOVA_ZONA), od, do):
+                    break  # nepotvrdit neobsloužené zprávy
+                offset = u["update_id"] + 1
+                msg = u.get("message") or {}
+                if str((msg.get("chat") or {}).get("id", "")) != chat_id():
+                    continue
+                prijato += 1
+                if args.dry_run:
+                    print(f"DRY-RUN update {u['update_id']}", flush=True)
+                    bez_odpovedi += 1
+                    continue
+                if zpracuj(u) is not True:
+                    bez_odpovedi += 1
+        if offset and v_okne(datetime.now(CASOVA_ZONA), od, do):
+            try:
+                tg("getUpdates", {"offset": offset, "timeout": 0, "limit": 1}, timeout=1)
+            except Exception:
+                pass
+    finally:
+        if args.diagnostika:
+            print(f"diagnostika: poslech {time.monotonic() - start:.1f} s, "
+                  f"zpráv {prijato}, bez odpovědi {bez_odpovedi}", flush=True)
     return 0
 
 
