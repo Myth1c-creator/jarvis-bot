@@ -185,10 +185,17 @@ class WorkflowTests(unittest.TestCase):
         cesta = Path(__file__).resolve().parent / '.github' / 'workflows' / 'bot.yml'
         self.radky = cesta.read_text(encoding='utf-8').splitlines()
 
-    def test_cron_bezi_cely_den_a_tyden(self):
+    def test_cron_je_zaloha_pro_pripad_preruseneho_retezeni(self):
         crony = [r for r in self.radky if r.strip().startswith('- cron:')]
         self.assertEqual(len(crony), 1)
-        self.assertIn('"*/10 * * * *"', crony[0])
+        self.assertIn('"21 */6 * * *"', crony[0])
+
+    def test_retezeni_spousti_dalsi_beh_pres_PAT(self):
+        vse = '\n'.join(self.radky)
+        self.assertIn('secrets.PAT', vse)
+        self.assertIn('gh workflow run bot.yml', vse)
+        self.assertIn('status=queued', vse)
+        self.assertIn('if: always()', vse)
 
     def test_prikaz_ma_okno_0_23(self):
         prikazy = [r for r in self.radky if 'posli_bot.py --sekundy' in r]

@@ -2,10 +2,9 @@ name: Jarvis bot (cloud)
 
 on:
   schedule:
-    # každých 10 minut, celý den a celý týden; běh trvá až 5 h 40 min.
-    # O pozornost se dělí s lokálním botem přes HTTP 409: když poslouchá lokální bot,
-    # cloud skončí a zkusí to za 10 minut znovu.
-    - cron: "*/10 * * * *"
+    # Záloha pro případ, že se přetrhne řetězení (viz poslední krok workflow).
+    # Řetězení je hlavní: na konci běhu se spustí další, takže cloud poslouchá nepřetržitě.
+    - cron: "21 */6 * * *"
   workflow_dispatch:
     inputs:
       zkouska:
@@ -40,3 +39,27 @@ jobs:
           else
             python3 posli_bot.py --sekundy 20400 --okno 0-23 --diagnostika
           fi
+
+      # Řetězení: na konci běhu spustí další, aby cloud poslouchal nepřetržitě.
+      # Potřebuje secret PAT (fine-grained token s právem Actions: read and write).
+      # Když PAT chybí nebo už nějaký běh čeká ve frontě, nic nespouští –
+      # o záskok se postará cron výše.
+      - name: Spusť další běh (řetězení)
+        if: always() && !inputs.zkouska
+        continue-on-error: true
+        env:
+          PAT: ${{ secrets.PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "Secret PAT není nastavený – řetězení přeskočeno."
+            exit 0
+          fi
+          export GH_TOKEN="$PAT"
+          fronta=$(gh api "repos/$REPO/actions/runs?status=queued" --jq '.total_count')
+          if [ "$fronta" -gt 0 ]; then
+            echo "Ve frontě už čeká $fronta běh(ů) – neřetězím."
+            exit 0
+          fi
+          gh workflow run bot.yml --ref "$GITHUB_REF_NAME"
+          echo "Další běh naplánován."
