@@ -3,6 +3,7 @@ import io
 import unittest
 import urllib.error
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import posli_bot as bot
@@ -110,7 +111,7 @@ class BotTests(unittest.TestCase):
                 hodiny[0] = now.replace(hour=17, minute=0)
                 return False
             return True
-        with patch.object(bot, 'datetime') as dt, patch.object(bot, 'tg', side_effect=telegram) as tg, patch.object(bot, 'zpracuj', side_effect=zpracuj), patch('sys.argv', ['bot', '--diagnostika']), contextlib.redirect_stdout(io.StringIO()) as out:
+        with patch.object(bot, 'datetime') as dt, patch.object(bot, 'tg', side_effect=telegram) as tg, patch.object(bot, 'zpracuj', side_effect=zpracuj), patch('sys.argv', ['bot', '--okno', '4-17', '--diagnostika']), contextlib.redirect_stdout(io.StringIO()) as out:
             dt.now.side_effect = lambda zone: hodiny[0]
             self.assertEqual(bot.main(), 0)
             self.assertEqual(tg.call_count, 1)
@@ -161,6 +162,41 @@ class BotTests(unittest.TestCase):
             self.assertEqual(posli.call_count,2)
             for call in posli.call_args_list:
                 self.assertEqual(call.args[0],'Hlasovku v cloudu nepřepíšu – napiš to prosím textem.')
+
+    def test_okno_0_23_je_cely_den_i_vikend(self):
+        sobota = datetime(2026, 11, 14, 23, 30, tzinfo=bot.CASOVA_ZONA)
+        for now in (sobota, sobota.replace(hour=0, minute=0), sobota.replace(day=15, hour=12)):
+            with self.subTest(now=now):
+                self.assertTrue(bot.v_okne(now, 0, 23))
+        self.assertTrue(bot.v_okne(sobota.replace(hour=10), 4, 17))
+        self.assertFalse(bot.v_okne(sobota, 4, 17))
+
+    def test_vychozi_okno_posloucha_v_sobotu_ve_2330(self):
+        with patch.object(bot, 'datetime') as dt, patch.object(bot, 'token', return_value='offline'), patch.object(bot.urllib.request, 'urlopen', side_effect=urllib.error.HTTPError('offline',409,'Conflict',{},None)) as net, patch('sys.argv', ['bot','--diagnostika']), contextlib.redirect_stdout(io.StringIO()) as out:
+            dt.now.return_value = datetime(2026, 11, 14, 23, 30, tzinfo=bot.CASOVA_ZONA)
+            self.assertEqual(bot.main(), 0)
+            self.assertEqual(net.call_count, 1)
+            self.assertNotIn('Mimo okno', out.getvalue())
+            self.assertIn('konflikt: ano', out.getvalue())
+
+
+class WorkflowTests(unittest.TestCase):
+    def setUp(self):
+        cesta = Path(__file__).resolve().parent / '.github' / 'workflows' / 'bot.yml'
+        self.radky = cesta.read_text(encoding='utf-8').splitlines()
+
+    def test_cron_bezi_cely_den_a_tyden(self):
+        crony = [r for r in self.radky if r.strip().startswith('- cron:')]
+        self.assertEqual(len(crony), 1)
+        self.assertIn('"*/10 * * * *"', crony[0])
+
+    def test_prikaz_ma_okno_0_23(self):
+        prikazy = [r for r in self.radky if 'posli_bot.py --sekundy' in r]
+        self.assertEqual(len(prikazy), 1)
+        self.assertIn('--okno 0-23', prikazy[0])
+
+    def test_beh_se_nerusi(self):
+        self.assertIn('cancel-in-progress: false', [r.strip() for r in self.radky])
 
 
 if __name__ == '__main__':

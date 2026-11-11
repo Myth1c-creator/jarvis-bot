@@ -2,8 +2,10 @@ name: Jarvis bot (cloud)
 
 on:
   schedule:
-    # každých 10 minut v noci/odpoledne; běh trvá až 5 h 40 min a hlídá si okno 4–17 Praha
-    - cron: "*/10 2-16 * * 1-5"
+    # každých 10 minut, celý den a celý týden; běh trvá až 5 h 40 min.
+    # O pozornost se dělí s lokálním botem přes HTTP 409: když poslouchá lokální bot,
+    # cloud skončí a zkusí to za 10 minut znovu.
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       zkouska:
@@ -36,5 +38,5 @@ jobs:
           if [ -n "$ZKOUSKA" ]; then
             python3 posli_bot.py --zkouska "$ZKOUSKA"
           else
-            python3 posli_bot.py --sekundy 20400 --okno 4-17 --diagnostika
+            python3 posli_bot.py --sekundy 20400 --okno 0-23 --diagnostika
           fi

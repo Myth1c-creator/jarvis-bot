@@ -1,7 +1,8 @@
 """Jarvis – cloudový Telegram bot (běží na GitHub Actions, PC může být vypnutý).
 
 Zpracuje zprávy, které přišly, odpoví a skončí. Spouští ho workflow
-`.github/workflows/bot.yml` každých 10 minut (Po–Pá 4:00–17:00 Praha).
+`.github/workflows/bot.yml` každých 10 minut, celý den a celý týden. Když už
+poslouchá lokální bot (HTTP 409), běh hned skončí a zkusí to příští cron.
 
   python3 posli_bot.py --sekundy 280     # poslouchej a odpovídej
   python3 posli_bot.py --dry-run         # jen vypiš, co by přišlo
@@ -479,14 +480,19 @@ def zpracuj(u: dict) -> bool | None:
         return False
 
 
+CELY_DEN = (0, 23)
+
+
 def v_okne(now: datetime, od: int, do: int) -> bool:
-    return now.weekday() < 5 and od <= now.hour < do
+    # 0-23 znamená celý den včetně 23:00–23:59; jiná okna končí hodinou „do“
+    return (od, do) == CELY_DEN or od <= now.hour < do
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sekundy", type=int, default=280)
-    ap.add_argument("--okno", default="4-17", help="hodiny Praha, kdy smí běžet (od-do)")
+    ap.add_argument("--okno", default="0-23",
+                    help="hodiny Praha, kdy smí běžet (od-do), každý den; 0-23 = celý den")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--diagnostika", action="store_true", help="vypíše dobu poslechu a počty zpráv")
     ap.add_argument("--zkouska", default="", help="pošli zkušební odpověď modelu a skonči")
@@ -519,8 +525,10 @@ def main() -> int:
             now = datetime.now(CASOVA_ZONA)
             if not v_okne(now, od, do):
                 break
-            zbyva = min(konec - time.monotonic(),
-                        (now.replace(hour=do, minute=0, second=0, microsecond=0) - now).total_seconds())
+            zbyva = konec - time.monotonic()
+            if (od, do) != CELY_DEN:
+                zbyva = min(zbyva,
+                            (now.replace(hour=do, minute=0, second=0, microsecond=0) - now).total_seconds())
             if zbyva < 1:
                 break
             try:
