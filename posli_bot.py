@@ -33,6 +33,8 @@ CASOVA_ZONA = ZoneInfo("Europe/Prague")
 API = "https://api.telegram.org/bot{token}/{method}"
 POMOC = (
     "Cloud režim (PC může být vypnutý):\n"
+    "• napiš seznam úkolů (klidně po řádcích) – připravím je a „zapiš“ je založí\n"
+    "• bez času dám před 18:00 dnešní 18:00, jinak zítra 9:00\n"
     "• briefing / dnes / zítra / týden\n"
     "• kolik mám úkolů\n"
     "• hotovo <název úkolu>\n"
@@ -131,7 +133,7 @@ def _kdy(text: str):
         if j.startswith(("w", "tyden", "týden")):
             return now + timedelta(weeks=n)
         return now + timedelta(days=n)
-    m = re.fullmatch(r"(?:(dnes|zitra|zítra|pozitri|pozítří)\s+)?(\d{1,2})[:.](\d{2})", t)
+    m = re.fullmatch(r"(?:(dnes|zitra|zítra|pozitri|pozítří)\s+)?(?:v\s+)?(\d{1,2})[:.](\d{2})", t)
     if m:
         posun = {"zitra": 1, "zítra": 1, "pozitri": 2, "pozítří": 2}.get(m.group(1) or "", 0)
         hod, minuta = int(m.group(2)), int(m.group(3))
@@ -175,17 +177,195 @@ def novy_ukol(text: str) -> str:
     return "Nerozumím času. Třeba: nový úkol zavolat DIS zítra 15:00 (nebo +2h)."
 
 
+# ---------- dávka úkolů (business režim) ----------
+
+# Hlavičky typu „Dnes:“ nebo „Tasky:“ nejsou úkol.
+_NADPIS_RE = re.compile(
+    r"^(?:dnes|dneska|zitra|pozitri|tasky|ukoly|plan|seznam|moje tasky|muj plan|"
+    r"poznamky|na dnes|na zitra)\s*:?\s*$", re.IGNORECASE)
+# „musím“, „ještě“, „tak“ na začátku věty do názvu úkolu nepatří.
+_PLNICI_RE = re.compile(
+    r"^(?:a|tak|takže|no|hele|ještě|jeste|musím|musim|potřebuju|potrebuju|"
+    r"potřebuji|potrebuji|mám|mam)\s+", re.IGNORECASE)
+
+# Příkazy, které se nesmí splést s výčtem úkolů.
+_NEUKOL = ("novy ukol", "novej ukol", "pridej", "ukol ", "novy task", "pripomen",
+           "pripominej", "hotovo", "splneno", "stav", "pomoc", "briefing",
+           "pripominky", "zapis", "uloz")
+# Otázky, na které se neodpovídá jako na úkol.
+_DOTAZ_SLOVA = ("ukol", "ukoly", "task", "tasky", "briefing", "prehled", "pripominky",
+                "pomoc", "hotovo", "odloz", "snooze", "zapis", "kolik", "kdy", "kde",
+                "kdo", "jaky", "jake", "jak", "proc")
+_DOTAZ_ZACATKY = ("co", "kolik", "kdy", "kde", "kdo", "jaky", "jake", "jak", "proc",
+                  "mam", "mame", "mas", "vypis", "ukaz", "rekni", "briefing",
+                  "pripomen", "pripominej")
+
+POTVRZENI = ("ano", "jo", "jj", "ok", "oki", "okey", "jasne", "sure", "yes", "yep",
+             "zapis", "zapis to", "zapis vse", "uloz", "uloz to", "muzes",
+             "muzes to pridat", "muzes to tam dat", "pridej", "pridej to",
+             "dej to tam", "jdi do toho", "urcite")
+ZRUSENI = ("ne", "nech to", "nic", "to je vse", "to je vsechno", "jeste ne",
+           "zrus", "zrus to", "zapomen to", "nemusis", "nedelej to")
+
+
+def _radky_ukolu(text: str) -> list:
+    """Rozdělí zprávu na jednotlivé úkoly – řádky, odrážky, středníky, číslování."""
+    kusy = []
+    for radek in re.split(r"[\r\n]+", text or ""):
+        for cast in re.split(r"\s*[;•]\s*", radek):
+            c = re.sub(r"^\s*(?:\d+[.)]|[-*–])\s*", "", cast).strip()
+            if len(c) >= 3:
+                kusy.append(c)
+    return kusy
+
+
+def _vety(text: str) -> list:
+    return [v.strip() for v in re.split(r"(?<=[.!?])\s+", text or "") if len(v.strip()) >= 3]
+
+
+def _casti_ukolu(text: str) -> list:
+    return _radky_ukolu(text) if "\n" in (text or "") else _vety(text)
+
+
+def _cas_na_konci(cast: str) -> tuple:
+    """(název, termin) – čas bere z konce části, stejně jako novy_ukol."""
+    slova = cast.split()
+    for n in (3, 2, 1):
+        if len(slova) <= n:
+            continue
+        try:
+            termin = _kdy(" ".join(slova[-n:]))
+        except ValueError:
+            continue
+        nazev = " ".join(slova[:-n]).strip(" ,-")
+        if nazev:
+            return nazev, termin
+    return cast.strip(" ,-"), None
+
+
+def _pocet_casu(text: str) -> int:
+    return sum(1 for cast in _casti_ukolu(text) if _cas_na_konci(cast)[1] is not None)
+
+
+def _vychozi_termin() -> datetime:
+    """Úkol bez času: před 18:00 dnešní 18:00, jinak zítra 9:00."""
+    ted = datetime.now(CASOVA_ZONA)
+    if ted.hour < 18:
+        return ted.replace(hour=18, minute=0, second=0, microsecond=0)
+    return (ted + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+
+def _bez_interpunkce(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", " ".join(_norm(text).split())).strip()
+
+
+def _je_potvrzeni(text: str) -> bool:
+    t = _bez_interpunkce(text)
+    if t in POTVRZENI:
+        return True
+    slova = t.split()
+    if not slova or slova[0] not in ("ano", "jo", "jj", "ok", "jasne", "urcite", "yes", "yep"):
+        return False
+    return any(s in slova for s in ("zapis", "uloz", "pridej", "dej", "muzes", "to"))
+
+
+def _je_zruseni(text: str) -> bool:
+    return _bez_interpunkce(text) in ZRUSENI
+
+
+def _je_dotaz(text: str) -> bool:
+    t = " ".join(_norm(text).split())
+    if not t:
+        return False
+    if t.endswith("?"):
+        return True
+    slova = re.findall(r"\w+", t)
+    if slova and slova[0] in _DOTAZ_ZACATKY:
+        return True
+    return any(s in slova for s in _DOTAZ_SLOVA)
+
+
+def _je_davka(text: str) -> bool:
+    """Vypadá to jako výčet úkolů? (víc řádků/vět s časy, nebo klíčové slovo)"""
+    t = " ".join(_norm(text).split())
+    if t.startswith(("tasky", "muj plan", "plan na dnes", "dnes mam",
+                     "seznam ukolu", "tyhle tasky", "moje tasky")):
+        return True
+    casti = _casti_ukolu(text)
+    if not casti:
+        return False
+    if _NADPIS_RE.match(casti[0].strip()):
+        return len(casti) >= 2
+    if " ".join(_norm(casti[0]).split()).startswith(_NEUKOL) or _je_dotaz(text):
+        return False
+    if len(casti) == 1:
+        return _cas_na_konci(casti[0])[1] is not None
+    if _pocet_casu(text) >= 2:
+        return True
+    if len(casti) >= 3:
+        return True
+    return all(len(c.split()) <= 6 for c in casti)
+
+
+def prehled_davky() -> str:
+    """Co je připravené k zápisu + otázka, jestli přidat a jestli je ještě něco."""
+    if not CEKA_NA_ZAPIS:
+        return "Zatím nic k zápisu – napiš úkoly po řádcích."
+    radky = []
+    for i, (nazev, termin) in enumerate(CEKA_NA_ZAPIS, 1):
+        try:
+            kdy = f"{datetime.fromisoformat(str(termin)):%d.%m. %H:%M}"
+        except ValueError:
+            kdy = "bez času"
+        radky.append(f"{i}. {nazev} – {kdy}")
+    return ("Mám to takhle:\n" + "\n".join(radky) +
+            "\n\nPřidat do Notionu? Napiš „zapiš“."
+            "\nJeště něco?")
+
+
+def davka(text: str) -> str:
+    """Výčet úkolů → připraví je k zápisu; chybějící čas doplní rozumným výchozím."""
+    casti = _casti_ukolu(text)
+    if not casti:
+        return ("Napiš úkoly po řádcích, třeba:\n"
+                "• obepsat 5 lidí DIS dnes 18:00\n• zavolat Tomášovi zítra 9:00")
+    nove = []
+    for cast in casti:
+        if _NADPIS_RE.match(cast.strip()):
+            continue
+        nazev, termin = _cas_na_konci(cast)
+        if termin is None:
+            termin = _vychozi_termin()
+        nazev = _PLNICI_RE.sub("", nazev).strip(" ,.-–!?")
+        if len(nazev) < 3:
+            continue
+        polozka = (nazev[:200], termin.isoformat(timespec="minutes"))
+        if polozka not in CEKA_NA_ZAPIS:
+            nove.append(polozka)
+    if not nove:
+        if CEKA_NA_ZAPIS:
+            return prehled_davky()
+        return "Nenašel jsem v tom žádný úkol. Napiš je po řádcích."
+    CEKA_NA_ZAPIS.extend(nove)
+    return prehled_davky()
+
+
 HISTORIE: list = []
 SYSTEM = (
-    "Jsi Jarvis, Ondrův osobní asistent v Telegramu (běžíš v cloudu, když je PC vypnuté). "
-    "Odpovídej česky, stručně (max 8 řádků), konkrétně a bez zbytečných frází.\n"
+    "Jsi Jarvis, Ondrův pracovní asistent v Telegramu (běžíš v cloudu, když je PC vypnuté). "
+    "Řešíš hlavně úkoly a termíny – odpovídej česky, stručně (max 8 řádků), věcně.\n"
+    "• Prioritu mají úkoly, termíny a další krok.\n"
+    "• Neptej se na detaily, které si umíš domyslet (čas úkolu, pořadí). Chybějící čas "
+    "doplň: před 18:00 dnešní 18:00, jinak zítra 9:00.\n"
+    "• Když Ondra vypíše víc úkolů, ber to jako seznam k založení – shrň je a čekej na „zapiš“.\n"
     "• K úkolům a termínům vycházej z přehledu níže – nic si nevymýšlej.\n"
     "• Když něco nevíš nebo ti chybí údaj, řekni to jednou větou a rovnou se zeptej.\n"
     "• Nepiš „Samozřejmě“, „Rád pomohu“ a neopakuj jeho otázku.\n"
     "• Nepoužívej markdown (** , #, `) – Telegram ho zobrazí jako znaky.\n"
     "• Víc položek vypisuj jako • odrážky, ne do odstavce.\n"
-    "Umíš: přehled úkolů (dnes/zítra/týden), založit úkol, „hotovo <název>“, "
-    "čtení úkolů ze screenshotu. Připomínky a hlasovky umí jen lokální bot na PC."
+    "Umíš: přehled úkolů (dnes/zítra/týden), založit úkol nebo celý seznam, "
+    "„hotovo <název>“, čtení úkolů ze screenshotu. Připomínky a hlasovky umí jen "
+    "lokální bot na PC."
 )
 
 _DNY = ("pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota", "neděle")
@@ -339,8 +519,9 @@ def foto(msg: dict) -> str:
 
 
 def zapis_z_fotky() -> str:
+    """Založí připravené úkoly (z fotky, z výčtu) a zeptá se, jestli je ještě něco."""
     if not CEKA_NA_ZAPIS:
-        return "Nemám co zapsat – pošli nejdřív fotku s úkoly."
+        return "Nemám co zapsat. Napiš úkoly (klidně po řádcích) nebo pošli fotku se seznamem."
     hotovo, chyby = [], 0
     for nazev, termin in CEKA_NA_ZAPIS:
         if not nazev or not termin:
@@ -359,11 +540,12 @@ def zapis_z_fotky() -> str:
             chyby += 1
     CEKA_NA_ZAPIS.clear()
     if not hotovo:
-        return "Nic jsem nezaložil – u úkolů chyběl čitelný termín."
+        return ("Nic jsem nezaložil – u úkolů chyběl čitelný termín. "
+                "Napiš je znovu, klidně i bez času.")
     text = f"Založeno {_pocet(len(hotovo), 'úkol', 'úkoly', 'úkolů')}:\n" + "\n".join(hotovo)
     if chyby:
         text += f"\n{chyby} jsem přeskočil (chyběl termín nebo Notion zlobil)."
-    return text
+    return text + "\n\nJeště něco?"
 
 
 def model(text: str) -> str:
@@ -444,6 +626,19 @@ def odpoved(text: str) -> str:
         return stav()
     if t in ("zapis", "zapis to", "uloz", "uloz to", "zapis vse"):
         return zapis_z_fotky()
+    if CEKA_NA_ZAPIS:
+        # Rozdělaná dávka: potvrzení zapíše, „ne“ zahodí, cokoli dalšího přidá.
+        if _je_potvrzeni(text):
+            return zapis_z_fotky()
+        if _je_zruseni(text):
+            CEKA_NA_ZAPIS.clear()
+            return "Dobře, nechal jsem to být. Kdybys chtěl, napiš úkoly znovu."
+        if t in ("diky", "dekuju", "super", "parada", "fajn"):
+            return "Není zač. Kdyby něco, jsem tu."
+        if _je_davka(text):  # přidání dalšího úkolu k rozdělané dávce
+            return davka(text)
+    if not t.startswith(_NEUKOL) and _je_davka(text):
+        return davka(text)
     if t.startswith(("novy ukol", "novej ukol", "pridej", "ukol ", "novy task")):
         return novy_ukol(text)
     prehled = not t.startswith(("hotovo", "splneno"))

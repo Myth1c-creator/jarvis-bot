@@ -310,5 +310,59 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('cancel-in-progress: false', [r.strip() for r in self.radky])
 
 
+class DavkaTests(unittest.TestCase):
+    """Business režim v cloudu: výčet úkolů → připravit → „zapis“ → hotovo + „Ještě něco?“"""
+
+    SEZNAM = ("Dnes:\n"
+              "- obepsat 5 lidí DIS\n"
+              "- zavolat Tomášovi zítra 10:00\n")
+
+    def setUp(self):
+        for name, kwargs in (
+            ('urllib.request.urlopen', {'side_effect': AssertionError('Síť zakázána')}),
+            ('chat_id', {'return_value': '123'}),
+            ('notion.nacti_ukoly', {'return_value': []}),
+            ('model', {'return_value': ''}),
+        ):
+            target = patch('posli_bot.' + name, **kwargs)
+            target.start()
+            self.addCleanup(target.stop)
+        bot.CEKA_NA_ZAPIS.clear()
+
+    def tearDown(self):
+        bot.CEKA_NA_ZAPIS.clear()
+
+    def test_seznam_se_pripravi_a_zepta(self):
+        text = bot.odpoved(self.SEZNAM)
+        self.assertIn('Přidat do Notionu?', text)
+        self.assertIn('Ještě něco?', text)
+        self.assertEqual(len(bot.CEKA_NA_ZAPIS), 2)
+        self.assertEqual(bot.CEKA_NA_ZAPIS[0][0], 'obepsat 5 lidí DIS')
+        self.assertEqual(bot.CEKA_NA_ZAPIS[1], ('zavolat Tomášovi', '2026-11-13T10:00+01:00'))
+
+    def test_ano_zapise_a_zepta_se_jeste_neco(self):
+        bot.odpoved(self.SEZNAM)
+        with patch.object(bot.notion, 'vytvor_ukol', return_value='id') as vytvor:
+            text = bot.odpoved('ano, můžeš to přidat')
+        self.assertEqual(vytvor.call_count, 2)
+        self.assertIn('Založeno 2 úkoly', text)
+        self.assertTrue(text.endswith('Ještě něco?'))
+        self.assertEqual(bot.CEKA_NA_ZAPIS, [])
+
+    def test_dotaz_na_dnes_zustava_prehledem(self):
+        with patch.object(bot.notion, 'sestav_prehled', return_value='DNES'):
+            self.assertEqual(bot.odpoved('co mám dnes'), 'DNES')
+        self.assertEqual(bot.CEKA_NA_ZAPIS, [])
+
+    def test_vychozi_termin_pred_osmnactou(self):
+        with patch.object(bot, 'datetime') as dt:
+            dt.now.return_value = datetime(2026, 11, 12, 17, 0, tzinfo=bot.CASOVA_ZONA)
+            self.assertEqual(bot._vychozi_termin(),
+                             datetime(2026, 11, 12, 18, 0, tzinfo=bot.CASOVA_ZONA))
+            dt.now.return_value = datetime(2026, 11, 12, 19, 0, tzinfo=bot.CASOVA_ZONA)
+            self.assertEqual(bot._vychozi_termin(),
+                             datetime(2026, 11, 13, 9, 0, tzinfo=bot.CASOVA_ZONA))
+
+
 if __name__ == '__main__':
     unittest.main()
