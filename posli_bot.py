@@ -84,10 +84,17 @@ def neprázdná(text: str) -> str:
 
 
 def posli(text: str) -> None:
-    text = neprázdná(text)
+    text = _cisty(neprázdná(text))
     for cast in [text[i:i + 3800] for i in range(0, len(text), 3800)] or [text]:
         tg("sendMessage", {"chat_id": chat_id(), "text": cast,
                            "disable_web_page_preview": True})
+
+
+def _cisty(text: str) -> str:
+    """Odstraní markdown, který Telegram v prostém textu zobrazuje jako znaky."""
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    t = re.sub(r"(?m)^#{1,6}\s*", "", t)
+    return t.replace("`", "")
 
 
 def pisni() -> None:
@@ -169,8 +176,26 @@ def novy_ukol(text: str) -> str:
 
 
 HISTORIE: list = []
-SYSTEM = ("Jsi Jarvis, Ondrův osobní asistent. Odpovídej česky, stručně (max 8 řádků), "
-          "prakticky a bez zbytečných frází. Když něco nevíš, řekni to.")
+SYSTEM = (
+    "Jsi Jarvis, Ondrův osobní asistent v Telegramu (běžíš v cloudu, když je PC vypnuté). "
+    "Odpovídej česky, stručně (max 8 řádků), konkrétně a bez zbytečných frází.\n"
+    "• K úkolům a termínům vycházej z přehledu níže – nic si nevymýšlej.\n"
+    "• Když něco nevíš nebo ti chybí údaj, řekni to jednou větou a rovnou se zeptej.\n"
+    "• Nepiš „Samozřejmě“, „Rád pomohu“ a neopakuj jeho otázku.\n"
+    "• Nepoužívej markdown (** , #, `) – Telegram ho zobrazí jako znaky.\n"
+    "• Víc položek vypisuj jako • odrážky, ne do odstavce.\n"
+    "Umíš: přehled úkolů (dnes/zítra/týden), založit úkol, „hotovo <název>“, "
+    "čtení úkolů ze screenshotu. Připomínky a hlasovky umí jen lokální bot na PC."
+)
+
+_DNY = ("pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota", "neděle")
+
+
+def ted_text() -> str:
+    """Aktuální čas pro model – bez něj plete dny."""
+    ted = datetime.now(CASOVA_ZONA)
+    return f"Teď je {_DNY[ted.weekday()]} {ted:%d.%m.%Y %H:%M} (Praha)."
+
 
 
 def kontext() -> str:
@@ -347,7 +372,7 @@ def model(text: str) -> str:
     if not klic:
         return "Volný chat teď nemám (chybí klíč). Napiš „pomoc“."
     historie = HISTORIE[-6:] + [{"role": "user", "content": text[:4000]}]
-    system = SYSTEM
+    system = SYSTEM + "\n" + ted_text()
     k = kontext()
     if k:
         system += "\n" + k
@@ -357,11 +382,25 @@ def model(text: str) -> str:
         "https://api.anthropic.com/v1/messages", data=telo,
         headers={"x-api-key": klic.strip(), "anthropic-version": "2023-06-01",
                  "Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read())
-    except (urllib.error.HTTPError, urllib.error.URLError) as e:
-        print(f"Claude: {e}", file=sys.stderr, flush=True)
+    data = None
+    for pokus in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = json.loads(r.read())
+            break
+        except urllib.error.HTTPError as e:
+            print(f"Claude: HTTP {e.code}", file=sys.stderr, flush=True)
+            if e.code in (429, 500, 502, 503, 504) and pokus == 1:
+                time.sleep(2)
+                continue
+            return "Model teď neodpověděl. Zkus to znovu."
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            print(f"Claude: {type(e).__name__}", file=sys.stderr, flush=True)
+            if pokus == 1:
+                time.sleep(1)
+                continue
+            return "Model teď neodpověděl. Zkus to znovu."
+    if not data:
         return "Model teď neodpověděl. Zkus to znovu."
     casti = [c.get("text", "") for c in data.get("content", []) if c.get("type") == "text"]
     odpoved = "\n".join(casti).strip()
@@ -373,12 +412,36 @@ def model(text: str) -> str:
     return odpoved[:3500]
 
 
+def stav() -> str:
+    """Rychlá diagnóza pro případ, že něco neodpovídá – běží v cloudu."""
+    radky = ["Jsem cloudový Jarvis (GitHub Actions)."]
+    try:
+        d = _obsah_tepu()
+        cas = datetime.fromisoformat(str(d["cas"]))
+        if cas.tzinfo is None:
+            cas = cas.replace(tzinfo=CASOVA_ZONA)
+        vek = int((datetime.now(CASOVA_ZONA) - cas).total_seconds())
+        stav_bota = "žije" if vek < TEP_STARI else "neběží"
+        radky.append(f"Lokální bot: tep před {vek} s ({stav_bota}).")
+    except Exception:  # noqa: BLE001
+        radky.append("Lokální bot: tep se nepodařilo přečíst.")
+    u = _ukoly()
+    if isinstance(u, list):
+        radky.append(f"Úkoly: {len(u)} nehotových.")
+    else:
+        radky.append(f"Notion: {u}")
+    radky.append("Připomínky a hlasovky umí jen lokální bot na PC.")
+    return "\n".join(radky)
+
+
 def odpoved(text: str) -> str:
     t = " ".join(_norm(text).split())
     if t in ("/start", "start", "ahoj", "cau", "nazdar"):
         return "Jarvis na příjmu (cloud).\n" + POMOC
     if t in ("pomoc", "help", "/help", "co umis"):
         return POMOC
+    if t in ("stav", "status", "/stav", "jak jsi na tom"):
+        return stav()
     if t in ("zapis", "zapis to", "uloz", "uloz to", "zapis vse"):
         return zapis_z_fotky()
     if t.startswith(("novy ukol", "novej ukol", "pridej", "ukol ", "novy task")):

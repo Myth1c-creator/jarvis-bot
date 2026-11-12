@@ -76,6 +76,11 @@ class BotTests(unittest.TestCase):
                 bot.posli(text)
                 self.assertEqual(tg.call_args.args[1]['text'], bot.FALLBACK)
 
+    def test_posli_odstrani_markdown(self):
+        with patch.object(bot, 'tg') as tg:
+            bot.posli('**Dnes** a `týden`')
+            self.assertEqual(tg.call_args.args[1]['text'], 'Dnes a týden')
+
     def test_stara_zprava_odpovi_bez_provedeni(self):
         with patch.object(bot, 'odpoved') as odpoved:
             self.assertIn('zpožděním', bot.zprava({'date': 1, 'text': 'hotovo úkol'}))
@@ -181,6 +186,57 @@ class BotTests(unittest.TestCase):
             self.assertEqual(net.call_count, 1)
             self.assertNotIn('Mimo okno', out.getvalue())
             self.assertIn('konflikt: ano', out.getvalue())
+
+
+class StavTests(unittest.TestCase):
+    """Příkaz „stav“ v cloudu: pozná, jestli lokální bot žije, a řekne počet úkolů."""
+
+    def test_stav_hlasi_tep_i_ukoly(self):
+        cas = (datetime.now(bot.CASOVA_ZONA) - timedelta(seconds=30)).isoformat(timespec='seconds')
+        with patch.object(bot, '_obsah_tepu', return_value={'cas': cas}), \
+                patch.object(bot, '_ukoly', return_value=[1, 2]):
+            text = bot.stav()
+        self.assertIn('tep před', text)
+        self.assertIn('žije', text)
+        self.assertIn('2 nehotových', text)
+
+    def test_stav_pri_starem_tepu_rekne_nebezi(self):
+        cas = (datetime.now(bot.CASOVA_ZONA) - timedelta(seconds=3600)).isoformat(timespec='seconds')
+        with patch.object(bot, '_obsah_tepu', return_value={'cas': cas}), \
+                patch.object(bot, '_ukoly', return_value=[]):
+            self.assertIn('neběží', bot.stav())
+
+
+class ModelTests(unittest.TestCase):
+    """Volný chat: opakování při přechodné chybě a čas v systémové zprávě."""
+
+    def test_zkusi_znovu_pri_503(self):
+        ok = io.BytesIO(json.dumps({'content': [{'type': 'text', 'text': 'Ahoj'}]}).encode())
+        chyba = urllib.error.HTTPError('x', 503, 'Unavailable', {}, io.BytesIO(b'{}'))
+        with patch.dict('os.environ', {'ANTHROPIC_KEY': 'k'}), \
+                patch.object(bot, 'kontext', return_value=''), \
+                patch.object(bot.urllib.request, 'urlopen', side_effect=[chyba, ok]) as net, \
+                patch.object(bot.time, 'sleep'):
+            self.assertEqual(bot.model('ahoj'), 'Ahoj')
+            self.assertEqual(net.call_count, 2)
+
+    def test_pri_400_nerozkousi(self):
+        chyba = urllib.error.HTTPError('x', 400, 'Bad', {}, io.BytesIO(b'{}'))
+        with patch.dict('os.environ', {'ANTHROPIC_KEY': 'k'}), \
+                patch.object(bot, 'kontext', return_value=''), \
+                patch.object(bot.urllib.request, 'urlopen', side_effect=chyba) as net, \
+                patch.object(bot.time, 'sleep'):
+            self.assertIn('Zkus to znovu', bot.model('ahoj'))
+            self.assertEqual(net.call_count, 1)
+
+    def test_system_ma_cas(self):
+        ok = io.BytesIO(json.dumps({'content': [{'type': 'text', 'text': 'Ahoj'}]}).encode())
+        with patch.dict('os.environ', {'ANTHROPIC_KEY': 'k'}), \
+                patch.object(bot, 'kontext', return_value=''), \
+                patch.object(bot.urllib.request, 'urlopen', return_value=ok) as net:
+            bot.model('ahoj')
+            telo = json.loads(net.call_args.args[0].data.decode())
+        self.assertIn('Teď je', telo['system'])
 
 
 class TepTests(unittest.TestCase):
